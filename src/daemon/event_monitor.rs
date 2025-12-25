@@ -46,10 +46,7 @@ impl EventMonitor {
         let modifiers = Self::extract_modifiers(key);
         let application = app_tracker.get_current_app();
 
-        debug!(
-            "Event: {:?} key_code={} app={}",
-            event_type, key_code, application
-        );
+        debug!("Event: {:?} app={}", event_type, application);
 
         Some(KeystrokeEvent::new(
             key_code.0,
