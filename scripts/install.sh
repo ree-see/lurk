@@ -21,7 +21,7 @@ chmod 700 ~/.lurk
 chmod 700 ~/.lurk/logs
 
 echo "Installing LaunchAgent..."
-PLIST_SRC="$PROJECT_DIR/launchd/com.user.lurk.plist"
+PLIST_TEMPLATE="$PROJECT_DIR/launchd/com.user.lurk.plist.template"
 PLIST_DST="$HOME/Library/LaunchAgents/com.user.lurk.plist"
 
 if [ -f "$PLIST_DST" ]; then
@@ -29,7 +29,8 @@ if [ -f "$PLIST_DST" ]; then
     launchctl unload "$PLIST_DST" 2>/dev/null || true
 fi
 
-cp "$PLIST_SRC" "$PLIST_DST"
+sed "s|__HOME__|$HOME|g" "$PLIST_TEMPLATE" > "$PLIST_DST"
+chmod 600 "$PLIST_DST"
 
 echo "Loading LaunchAgent..."
 launchctl load "$PLIST_DST"
