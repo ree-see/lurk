@@ -1,0 +1,48 @@
+[package]
+name = "lurk"
+version = "0.1.0"
+edition = "2021"
+description = "A local-only keystroke logger for custom keyboard design analysis"
+authors = ["reesee"]
+license = "MIT"
+repository = "https://github.com/reesee/lurk"
+keywords = ["keyboard", "keylogger", "typing", "macos"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# Event capture
+rdev = "0.5"
+
+# macOS APIs
+cocoa = "0.26"
+objc = "0.2"
+core-foundation = "0.10"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# CLI & Configuration
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5.0"
+
+# TUI Dashboard
+ratatui = "0.29"
+crossterm = "0.28"
+
+# macOS frameworks (FFI)
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
