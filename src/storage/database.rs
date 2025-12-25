@@ -6,11 +6,13 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use tracing::info;
 
 use crate::models::{EventType, KeystrokeEvent};
 
 const KEY_FILE_NAME: &str = ".key";
 const KEY_LENGTH: usize = 32;
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 pub struct Database {
     conn: Connection,
@@ -20,6 +22,10 @@ impl Database {
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         let db_path = db_path.as_ref();
         let is_memory = db_path.to_str() == Some(":memory:");
+
+        if !is_memory && db_path.exists() && Self::is_unencrypted_sqlite(db_path)? {
+            Self::migrate_to_encrypted(db_path)?;
+        }
 
         let conn = Connection::open(db_path)?;
 
@@ -40,6 +46,87 @@ impl Database {
         db.initialize_schema()?;
 
         Ok(db)
+    }
+
+    fn is_unencrypted_sqlite(path: &Path) -> Result<bool> {
+        let mut file = File::open(path)?;
+        let mut header = [0u8; 16];
+        if file.read_exact(&mut header).is_ok() {
+            return Ok(&header == SQLITE_HEADER);
+        }
+        Ok(false)
+    }
+
+    fn migrate_to_encrypted(db_path: &Path) -> Result<()> {
+        info!("Detected unencrypted database, migrating to encrypted format...");
+
+        let old_conn = Connection::open(db_path)?;
+        let events = Self::read_all_events_raw(&old_conn)?;
+        let event_count = events.len();
+        drop(old_conn);
+
+        let backup_path = db_path.with_extension("db.unencrypted");
+        fs::rename(db_path, &backup_path)?;
+
+        let key = Self::get_or_create_key(db_path)?;
+        let new_conn = Connection::open(db_path)?;
+        Self::apply_encryption(&new_conn, &key)?;
+
+        new_conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS keystroke_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                key_code INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                modifiers TEXT,
+                application TEXT NOT NULL
+            );
+            "#,
+        )?;
+
+        let tx = new_conn.unchecked_transaction()?;
+        for (timestamp, key_code, event_type, modifiers, application) in &events {
+            tx.execute(
+                "INSERT INTO keystroke_events (timestamp, key_code, event_type, modifiers, application)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![timestamp, key_code, event_type, modifiers, application],
+            )?;
+        }
+        tx.commit()?;
+        drop(new_conn);
+
+        fs::remove_file(&backup_path)?;
+
+        info!(
+            "Migration complete: {} events migrated to encrypted database",
+            event_count
+        );
+        Ok(())
+    }
+
+    fn read_all_events_raw(conn: &Connection) -> Result<Vec<(i64, u32, String, String, String)>> {
+        let mut stmt = conn.prepare(
+            "SELECT timestamp, key_code, event_type, modifiers, application
+             FROM keystroke_events
+             ORDER BY timestamp ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
     }
 
     fn get_or_create_key(db_path: &Path) -> Result<String> {
