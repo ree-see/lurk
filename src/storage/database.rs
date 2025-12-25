@@ -19,10 +19,14 @@ pub struct Database {
 impl Database {
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         let db_path = db_path.as_ref();
-        let key = Self::get_or_create_key(db_path)?;
+        let is_memory = db_path.to_str() == Some(":memory:");
 
         let conn = Connection::open(db_path)?;
-        Self::apply_encryption(&conn, &key)?;
+
+        if !is_memory {
+            let key = Self::get_or_create_key(db_path)?;
+            Self::apply_encryption(&conn, &key)?;
+        }
 
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
