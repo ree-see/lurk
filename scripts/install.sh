@@ -15,8 +15,10 @@ echo "Copying binary to /usr/local/bin/lurk..."
 sudo cp target/release/lurk /usr/local/bin/
 sudo chmod +x /usr/local/bin/lurk
 
-echo "Creating data directory..."
+echo "Creating data directory with secure permissions..."
 mkdir -p ~/.lurk/logs
+chmod 700 ~/.lurk
+chmod 700 ~/.lurk/logs
 
 echo "Installing LaunchAgent..."
 PLIST_SRC="$PROJECT_DIR/launchd/com.user.lurk.plist"

@@ -7,6 +7,8 @@ mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::fs::{self, Permissions};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -20,6 +22,24 @@ fn get_data_dir() -> PathBuf {
 
 fn get_db_path() -> PathBuf {
     get_data_dir().join("events.db")
+}
+
+const SECURE_DIR_MODE: u32 = 0o700;
+const SECURE_FILE_MODE: u32 = 0o600;
+
+fn create_secure_dir(path: &PathBuf) -> Result<()> {
+    if !path.exists() {
+        fs::create_dir_all(path)?;
+    }
+    fs::set_permissions(path, Permissions::from_mode(SECURE_DIR_MODE))?;
+    Ok(())
+}
+
+fn set_secure_file_permissions(path: &PathBuf) -> Result<()> {
+    if path.exists() {
+        fs::set_permissions(path, Permissions::from_mode(SECURE_FILE_MODE))?;
+    }
+    Ok(())
 }
 
 #[derive(Parser)]
@@ -108,13 +128,14 @@ fn run_daemon() -> Result<()> {
     daemon::ensure_permissions()?;
 
     let data_dir = get_data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    create_secure_dir(&data_dir)?;
 
     let log_dir = data_dir.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
+    create_secure_dir(&log_dir)?;
 
     let db_path = get_db_path();
     let db = storage::Database::new(&db_path)?;
+    set_secure_file_permissions(&db_path)?;
     info!("Database initialized: {:?}", db_path);
 
     let (tx, rx) = channel();
