@@ -7,6 +7,8 @@ mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::fs::{self, Permissions};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::thread;
@@ -20,6 +22,24 @@ fn get_data_dir() -> PathBuf {
 
 fn get_db_path() -> PathBuf {
     get_data_dir().join("events.db")
+}
+
+const SECURE_DIR_MODE: u32 = 0o700;
+const SECURE_FILE_MODE: u32 = 0o600;
+
+fn create_secure_dir(path: &PathBuf) -> Result<()> {
+    if !path.exists() {
+        fs::create_dir_all(path)?;
+    }
+    fs::set_permissions(path, Permissions::from_mode(SECURE_DIR_MODE))?;
+    Ok(())
+}
+
+fn set_secure_file_permissions(path: &PathBuf) -> Result<()> {
+    if path.exists() {
+        fs::set_permissions(path, Permissions::from_mode(SECURE_FILE_MODE))?;
+    }
+    Ok(())
 }
 
 #[derive(Parser)]
@@ -68,6 +88,15 @@ enum Commands {
 
     #[command(about = "Open interactive TUI dashboard")]
     Dashboard,
+
+    #[command(about = "Delete old keystroke data")]
+    Cleanup {
+        #[arg(short, long, default_value = "90", help = "Delete events older than N days")]
+        days: u32,
+
+        #[arg(short, long, help = "Skip confirmation prompt")]
+        force: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -87,6 +116,7 @@ fn main() -> Result<()> {
         Some(Commands::Analyze { top, max_gap, detailed }) => run_analyze(top, max_gap, detailed),
         Some(Commands::CheckPermission) => check_permission(),
         Some(Commands::Dashboard) => run_dashboard(),
+        Some(Commands::Cleanup { days, force }) => run_cleanup(days, force),
     }
 }
 
@@ -108,13 +138,14 @@ fn run_daemon() -> Result<()> {
     daemon::ensure_permissions()?;
 
     let data_dir = get_data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    create_secure_dir(&data_dir)?;
 
     let log_dir = data_dir.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
+    create_secure_dir(&log_dir)?;
 
     let db_path = get_db_path();
     let db = storage::Database::new(&db_path)?;
+    set_secure_file_permissions(&db_path)?;
     info!("Database initialized: {:?}", db_path);
 
     let (tx, rx) = channel();
@@ -354,6 +385,57 @@ fn check_permission() -> Result<()> {
         println!();
         println!("Then restart the daemon.");
     }
+
+    Ok(())
+}
+
+fn run_cleanup(days: u32, force: bool) -> Result<()> {
+    use std::io::{self, Write};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let db_path = get_db_path();
+
+    if !db_path.exists() {
+        eprintln!("No database found at {:?}", db_path);
+        return Ok(());
+    }
+
+    let db = storage::Database::new(&db_path)?;
+    let total_before = db.get_total_count()?;
+
+    if total_before == 0 {
+        println!("Database is empty. Nothing to clean up.");
+        return Ok(());
+    }
+
+    let cutoff_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_millis() as i64
+        - (days as i64 * 24 * 60 * 60 * 1000);
+
+    if !force {
+        print!(
+            "This will delete events older than {} days ({} total events in database). Continue? [y/N] ",
+            days, total_before
+        );
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cleanup cancelled.");
+            return Ok(());
+        }
+    }
+
+    let deleted = db.cleanup_old_events(cutoff_ms)?;
+    let total_after = db.get_total_count()?;
+
+    println!("Cleanup complete:");
+    println!("  Deleted: {} events", deleted);
+    println!("  Remaining: {} events", total_after);
 
     Ok(())
 }

@@ -18,8 +18,8 @@ cocoa = "0.26"
 objc = "0.2"
 core-foundation = "0.10"
 
-# Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Database (SQLCipher for encryption)
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # CLI & Configuration
 clap = { version = "4.5", features = ["derive"] }

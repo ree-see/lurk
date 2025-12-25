@@ -1,10 +1,16 @@
 #![allow(dead_code)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use crate::models::{EventType, KeystrokeEvent};
+
+const KEY_FILE_NAME: &str = ".key";
+const KEY_LENGTH: usize = 32;
 
 pub struct Database {
     conn: Connection,
@@ -12,7 +18,11 @@ pub struct Database {
 
 impl Database {
     pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
+        let db_path = db_path.as_ref();
+        let key = Self::get_or_create_key(db_path)?;
+
         let conn = Connection::open(db_path)?;
+        Self::apply_encryption(&conn, &key)?;
 
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -26,6 +36,66 @@ impl Database {
         db.initialize_schema()?;
 
         Ok(db)
+    }
+
+    fn get_or_create_key(db_path: &Path) -> Result<String> {
+        let key_path = Self::key_path(db_path)?;
+
+        if key_path.exists() {
+            let mut key = String::new();
+            File::open(&key_path)
+                .context("Failed to open key file")?
+                .read_to_string(&mut key)
+                .context("Failed to read key file")?;
+            return Ok(key.trim().to_string());
+        }
+
+        let key = Self::generate_random_key();
+
+        if let Some(parent) = key_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut file = File::create(&key_path).context("Failed to create key file")?;
+        file.write_all(key.as_bytes())?;
+
+        let mut perms = fs::metadata(&key_path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&key_path, perms)?;
+
+        Ok(key)
+    }
+
+    fn key_path(db_path: &Path) -> Result<PathBuf> {
+        let parent = db_path
+            .parent()
+            .context("Database path has no parent directory")?;
+        Ok(parent.join(KEY_FILE_NAME))
+    }
+
+    fn generate_random_key() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        let mut state = seed;
+        let charset: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+        (0..KEY_LENGTH)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let idx = ((state >> 33) as usize) % charset.len();
+                charset[idx] as char
+            })
+            .collect()
+    }
+
+    fn apply_encryption(conn: &Connection, key: &str) -> Result<()> {
+        conn.pragma_update(None, "key", key)?;
+        Ok(())
     }
 
     fn initialize_schema(&mut self) -> Result<()> {
