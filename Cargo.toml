@@ -10,14 +10,6 @@ keywords = ["keyboard", "keylogger", "typing", "macos"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-# Event capture
-rdev = "0.5"
-
-# macOS APIs
-cocoa = "0.26"
-objc = "0.2"
-core-foundation = "0.10"
-
 # Database (SQLCipher for encryption)
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 
@@ -33,13 +25,26 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5.0"
+libc = "0.2"
+
+# Networking (client/server sync)
+tokio = { version = "1.0", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+url = "2.5"
 
 # TUI Dashboard
 ratatui = "0.29"
 crossterm = "0.28"
 
-# macOS frameworks (FFI)
-libc = "0.2"
+[target.'cfg(target_os = "macos")'.dependencies]
+# Event capture (macOS only)
+rdev = "0.5"
+
+# macOS APIs
+cocoa = "0.26"
+objc = "0.2"
+core-foundation = "0.10"
 
 [profile.release]
 opt-level = 3

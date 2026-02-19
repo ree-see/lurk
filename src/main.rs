@@ -1,7 +1,9 @@
 mod analysis;
 mod cli;
+#[cfg(target_os = "macos")]
 mod daemon;
 mod models;
+mod server;
 mod storage;
 mod tui;
 
@@ -53,8 +55,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Run the capture daemon (default)")]
-    Daemon,
+    #[cfg(target_os = "macos")]
+    #[command(about = "Run the capture daemon (macOS only)")]
+    Daemon {
+        #[arg(short, long, help = "Send events to remote server (e.g., ws://server:9999)")]
+        remote: Option<String>,
+        
+        #[arg(long, default_value = "true", help = "Also store events locally")]
+        local: bool,
+    },
+
+    #[command(about = "Run the server to receive events from remote clients")]
+    Server {
+        #[arg(short, long, default_value = "9999", help = "Port to listen on")]
+        port: u16,
+    },
 
     #[command(about = "Export keystroke data")]
     Export {
@@ -83,6 +98,7 @@ enum Commands {
         detailed: bool,
     },
 
+    #[cfg(target_os = "macos")]
     #[command(about = "Check if Input Monitoring permission is granted")]
     CheckPermission,
 
@@ -110,10 +126,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        None | Some(Commands::Daemon) => run_daemon(),
+        #[cfg(target_os = "macos")]
+        None | Some(Commands::Daemon { remote: None, .. }) => run_daemon(None, true),
+        #[cfg(target_os = "macos")]
+        Some(Commands::Daemon { remote, local }) => run_daemon(remote, local),
+        #[cfg(not(target_os = "macos"))]
+        None => {
+            eprintln!("Daemon mode requires macOS. Use 'lurk server' on Linux.");
+            std::process::exit(1);
+        }
+        Some(Commands::Server { port }) => run_server(port),
         Some(Commands::Export { format, output }) => run_export(&format, &output),
         Some(Commands::Stats { days }) => run_stats(days),
         Some(Commands::Analyze { top, max_gap, detailed }) => run_analyze(top, max_gap, detailed),
+        #[cfg(target_os = "macos")]
         Some(Commands::CheckPermission) => check_permission(),
         Some(Commands::Dashboard) => run_dashboard(),
         Some(Commands::Cleanup { days, force }) => run_cleanup(days, force),
@@ -132,7 +158,8 @@ fn run_dashboard() -> Result<()> {
     tui::run_dashboard(&db_path)
 }
 
-fn run_daemon() -> Result<()> {
+#[cfg(target_os = "macos")]
+fn run_daemon(remote: Option<String>, local: bool) -> Result<()> {
     info!("Starting lurk daemon...");
 
     daemon::ensure_permissions()?;
@@ -143,20 +170,82 @@ fn run_daemon() -> Result<()> {
     let log_dir = data_dir.join("logs");
     create_secure_dir(&log_dir)?;
 
-    let db_path = get_db_path();
-    let db = storage::Database::new(&db_path)?;
-    set_secure_file_permissions(&db_path)?;
-    info!("Database initialized: {:?}", db_path);
-
     let (tx, rx) = channel();
 
-    thread::spawn(move || {
-        for event in rx {
-            if let Err(e) = db.insert_event(&event) {
-                error!("Failed to write event: {}", e);
-            }
+    match (&remote, local) {
+        // Remote only - send to server, no local storage
+        (Some(remote_url), false) => {
+            info!("Mode: remote only");
+            info!("Server: {}", remote_url);
+            
+            let config = server::RemoteClientConfig {
+                url: remote_url.clone(),
+                ..Default::default()
+            };
+            
+            thread::spawn(move || {
+                if let Err(e) = server::start_remote_client(config, rx) {
+                    error!("Remote client error: {}", e);
+                }
+            });
         }
-    });
+        
+        // Remote + local - send to both (clone events)
+        (Some(remote_url), true) => {
+            info!("Mode: remote + local backup");
+            info!("Server: {}", remote_url);
+            
+            let db_path = get_db_path();
+            let db = storage::Database::new(&db_path)?;
+            set_secure_file_permissions(&db_path)?;
+            info!("Local database: {:?}", db_path);
+            
+            let config = server::RemoteClientConfig {
+                url: remote_url.clone(),
+                ..Default::default()
+            };
+            
+            // Create second channel for remote
+            let (remote_tx, remote_rx) = channel();
+            
+            // Forward events to both local DB and remote
+            thread::spawn(move || {
+                for event in rx {
+                    // Store locally
+                    if let Err(e) = db.insert_event(&event) {
+                        error!("Failed to write event locally: {}", e);
+                    }
+                    // Forward to remote (ignore send errors, client handles reconnect)
+                    let _ = remote_tx.send(event);
+                }
+            });
+            
+            // Remote client
+            thread::spawn(move || {
+                if let Err(e) = server::start_remote_client(config, remote_rx) {
+                    error!("Remote client error: {}", e);
+                }
+            });
+        }
+        
+        // Local only (default)
+        (None, _) => {
+            info!("Mode: local only");
+            
+            let db_path = get_db_path();
+            let db = storage::Database::new(&db_path)?;
+            set_secure_file_permissions(&db_path)?;
+            info!("Database: {:?}", db_path);
+
+            thread::spawn(move || {
+                for event in rx {
+                    if let Err(e) = db.insert_event(&event) {
+                        error!("Failed to write event: {}", e);
+                    }
+                }
+            });
+        }
+    }
 
     info!("Starting event monitor...");
     info!("Press Ctrl+C to stop");
@@ -164,6 +253,22 @@ fn run_daemon() -> Result<()> {
     let monitor = daemon::EventMonitor::new(tx);
     monitor.start()?;
 
+    Ok(())
+}
+
+fn run_server(port: u16) -> Result<()> {
+    info!("Starting lurk server on port {}...", port);
+    
+    let data_dir = get_data_dir();
+    create_secure_dir(&data_dir)?;
+    
+    let db_path = get_db_path();
+    info!("Database: {:?}", db_path);
+    
+    // Run async server
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(server::run_server(port, &db_path))?;
+    
     Ok(())
 }
 
@@ -371,6 +476,7 @@ fn run_analyze(top: usize, max_gap: i64, detailed: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn check_permission() -> Result<()> {
     if daemon::check_input_monitoring_permission() {
         println!("Input Monitoring permission: GRANTED");

@@ -1,9 +1,11 @@
+#[cfg(target_os = "macos")]
 use rdev::Key;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyCode(pub u32);
 
 impl KeyCode {
+    #[cfg(target_os = "macos")]
     pub fn from_rdev_key(key: &Key) -> Self {
         let code = match key {
             Key::Alt => 0x3A,
