@@ -14,6 +14,7 @@ use crate::models::KeystrokeEvent;
 /// Configuration for the remote client
 pub struct RemoteClientConfig {
     pub url: String,
+    pub token: Option<String>,
     pub reconnect_interval: Duration,
     pub buffer_size: usize,
 }
@@ -22,6 +23,7 @@ impl Default for RemoteClientConfig {
     fn default() -> Self {
         Self {
             url: "ws://localhost:9999".to_string(),
+            token: None,
             reconnect_interval: Duration::from_secs(5),
             buffer_size: 1000,
         }
@@ -36,10 +38,8 @@ pub fn start_remote_client(
 ) -> Result<()> {
     // Create tokio runtime
     let rt = tokio::runtime::Runtime::new()?;
-    
-    rt.block_on(async move {
-        run_client_loop(config, rx).await
-    })
+
+    rt.block_on(async move { run_client_loop(config, rx).await })
 }
 
 async fn run_client_loop(
@@ -48,30 +48,53 @@ async fn run_client_loop(
 ) -> Result<()> {
     let url_str = config.url.clone();
     let _url = Url::parse(&url_str)?; // Validate URL format
-    
+
     // Bridge from sync to async
     let (async_tx, mut async_rx) = tokio_mpsc::channel::<KeystrokeEvent>(config.buffer_size);
-    
+
     // Spawn thread to forward from sync receiver
-    let forward_handle = std::thread::spawn(move || {
+    let _forward_handle = std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             if async_tx.blocking_send(event).is_err() {
                 break;
             }
         }
     });
-    
+
     // Buffer for events when disconnected
     let mut buffer: Vec<KeystrokeEvent> = Vec::new();
-    
+
     'connect: loop {
         info!("Connecting to {}...", url_str);
-        
+
         match connect_async(url_str.clone()).await {
             Ok((ws_stream, _)) => {
                 info!("Connected to server");
                 let (mut write, mut read) = ws_stream.split();
-                
+
+                // Send auth message if token configured
+                if let Some(ref t) = config.token {
+                    let auth_msg = serde_json::json!({"type": "auth", "token": t});
+                    if write
+                        .send(Message::Text(auth_msg.to_string()))
+                        .await
+                        .is_err()
+                    {
+                        warn!("Failed to send auth message");
+                        continue 'connect;
+                    }
+                    // Read welcome (or error) response
+                    match read.next().await {
+                        Some(Ok(Message::Text(_))) => {
+                            info!("Auth accepted by server");
+                        }
+                        _ => {
+                            warn!("Auth failed or server closed connection");
+                            continue 'connect;
+                        }
+                    }
+                }
+
                 // Drain buffer first
                 if !buffer.is_empty() {
                     info!("Sending {} buffered events", buffer.len());
@@ -99,7 +122,7 @@ async fn run_client_loop(
                         continue 'connect; // Reconnect
                     }
                 }
-                
+
                 // Main send loop
                 loop {
                     tokio::select! {
@@ -127,7 +150,7 @@ async fn run_client_loop(
                                 _ => {}
                             }
                         }
-                        
+
                         // Send events
                         event = async_rx.recv() => {
                             match event {
@@ -140,7 +163,7 @@ async fn run_client_loop(
                                         "modifiers": event.modifiers,
                                         "application": event.application,
                                     });
-                                    
+
                                     if write.send(Message::Text(msg.to_string())).await.is_err() {
                                         buffer.push(event);
                                         warn!("Send failed, buffering event");
@@ -161,7 +184,7 @@ async fn run_client_loop(
                 error!("Connection failed: {}", e);
             }
         }
-        
+
         // Reconnect delay
         warn!(
             "Disconnected. Buffered {} events. Reconnecting in {:?}...",
@@ -175,11 +198,22 @@ async fn run_client_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_config_default() {
         let config = RemoteClientConfig::default();
         assert_eq!(config.url, "ws://localhost:9999");
         assert_eq!(config.reconnect_interval, Duration::from_secs(5));
+        assert!(config.token.is_none());
+    }
+
+    #[test]
+    fn test_config_with_token() {
+        let config = RemoteClientConfig {
+            url: "ws://server:9999".to_string(),
+            token: Some("mysecret".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.token.as_deref(), Some("mysecret"));
     }
 }

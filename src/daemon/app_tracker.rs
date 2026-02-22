@@ -1,7 +1,4 @@
-#![allow(deprecated)]
-
-use cocoa::base::{id, nil};
-use objc::{class, msg_send, sel, sel_impl};
+use objc2_app_kit::NSWorkspace;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -35,30 +32,16 @@ impl AppTracker {
     }
 
     fn get_frontmost_app_internal() -> String {
+        // SAFETY: NSWorkspace is documented as thread-safe for reading by Apple.
         unsafe {
-            let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-            if workspace == nil {
+            let workspace = NSWorkspace::sharedWorkspace();
+            let Some(app) = workspace.frontmostApplication() else {
                 return "Unknown".to_string();
-            }
-
-            let frontmost_app: id = msg_send![workspace, frontmostApplication];
-            if frontmost_app == nil {
+            };
+            let Some(bundle_id) = app.bundleIdentifier() else {
                 return "Unknown".to_string();
-            }
-
-            let bundle_id: id = msg_send![frontmost_app, bundleIdentifier];
-            if bundle_id == nil {
-                return "Unknown".to_string();
-            }
-
-            let utf8: *const libc::c_char = msg_send![bundle_id, UTF8String];
-            if utf8.is_null() {
-                return "Unknown".to_string();
-            }
-
-            std::ffi::CStr::from_ptr(utf8)
-                .to_string_lossy()
-                .into_owned()
+            };
+            bundle_id.to_string()
         }
     }
 }
