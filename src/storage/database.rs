@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::fs::{self, File};
@@ -141,7 +139,7 @@ impl Database {
             return Ok(key.trim().to_string());
         }
 
-        let key = Self::generate_random_key();
+        let key = Self::generate_random_key()?;
 
         if let Some(parent) = key_path.parent() {
             fs::create_dir_all(parent)?;
@@ -164,24 +162,13 @@ impl Database {
         Ok(parent.join(KEY_FILE_NAME))
     }
 
-    fn generate_random_key() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-
-        let mut state = seed;
-        let charset: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-
-        (0..KEY_LENGTH)
-            .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let idx = ((state >> 33) as usize) % charset.len();
-                charset[idx] as char
-            })
-            .collect()
+    fn generate_random_key() -> Result<String> {
+        let mut bytes = [0u8; KEY_LENGTH];
+        File::open("/dev/urandom")
+            .context("Failed to open /dev/urandom")?
+            .read_exact(&mut bytes)
+            .context("Failed to read from /dev/urandom")?;
+        Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
     }
 
     fn apply_encryption(conn: &Connection, key: &str) -> Result<()> {

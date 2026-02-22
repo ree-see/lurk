@@ -332,15 +332,48 @@ impl App {
     }
 
     pub fn get_bigram_finger_stats(&self) -> BigramFingerStats {
+        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        if events.is_empty() {
+            return BigramFingerStats {
+                same_finger_pct: 0.0,
+                alternation_pct: 0.0,
+                worst_same_finger: vec![],
+            };
+        }
+        let freq = FrequencyAnalysis::from_events(events);
+        let layout = QwertyLayout::new();
+        let mut same_finger = 0u64;
+        let mut alternating = 0u64;
+        let mut same_finger_bigrams: Vec<(String, u64)> = Vec::new();
+
+        for bigram in &freq.bigram_frequencies {
+            let f1 = layout.get_finger(bigram.first_key);
+            let f2 = layout.get_finger(bigram.second_key);
+            match (f1, f2) {
+                (Some(a), Some(b)) if a == b => {
+                    same_finger += bigram.count;
+                    let label = format!(
+                        "{}{}",
+                        crate::models::keycode::KeyCode(bigram.first_key).to_name(),
+                        crate::models::keycode::KeyCode(bigram.second_key).to_name()
+                    );
+                    same_finger_bigrams.push((label, bigram.count));
+                }
+                (Some(a), Some(b)) if a.hand() != b.hand() => {
+                    alternating += bigram.count;
+                }
+                _ => {}
+            }
+        }
+
+        let total = same_finger + alternating;
+        same_finger_bigrams.sort_by(|a, b| b.1.cmp(&a.1));
+        same_finger_bigrams.truncate(4);
+
         BigramFingerStats {
-            same_finger_pct: 8.5,
-            alternation_pct: 54.2,
-            worst_same_finger: vec![
-                ("ED".to_string(), 2845),
-                ("UN".to_string(), 2234),
-                ("CE".to_string(), 1892),
-                ("MY".to_string(), 1456),
-            ],
+            same_finger_pct: if total > 0 { (same_finger as f64 / total as f64) * 100.0 } else { 0.0 },
+            alternation_pct: if total > 0 { (alternating as f64 / total as f64) * 100.0 } else { 0.0 },
+            worst_same_finger: same_finger_bigrams,
         }
     }
 
@@ -350,17 +383,25 @@ impl App {
             return vec![];
         }
 
-        let config = FilterConfig::default();
-        let timing = TimingAnalysis::from_events(events, config);
-        
-        vec![
-            ("0-50".to_string(), (timing.overall_inter_key.count as f64 * 0.15) as u64),
-            ("50-100".to_string(), (timing.overall_inter_key.count as f64 * 0.35) as u64),
-            ("100-150".to_string(), (timing.overall_inter_key.count as f64 * 0.25) as u64),
-            ("150-200".to_string(), (timing.overall_inter_key.count as f64 * 0.12) as u64),
-            ("200-250".to_string(), (timing.overall_inter_key.count as f64 * 0.08) as u64),
-            ("250+".to_string(), (timing.overall_inter_key.count as f64 * 0.05) as u64),
-        ]
+        let timing = TimingAnalysis::from_events(events, FilterConfig::default());
+        let buckets: &[(i64, i64, &str)] = &[
+            (0, 50, "0-50"),
+            (50, 100, "50-100"),
+            (100, 150, "100-150"),
+            (150, 200, "150-200"),
+            (200, 250, "200-250"),
+            (250, i64::MAX, "250+"),
+        ];
+        let mut counts = vec![0u64; buckets.len()];
+        for &ms in &timing.overall_inter_key.raw_intervals {
+            for (i, &(lo, hi, _)) in buckets.iter().enumerate() {
+                if ms >= lo && ms < hi {
+                    counts[i] += 1;
+                    break;
+                }
+            }
+        }
+        buckets.iter().zip(counts).map(|(&(_, _, label), c)| (label.to_string(), c)).collect()
     }
 
     pub fn get_speed_metrics(&self) -> SpeedMetrics {
@@ -400,29 +441,47 @@ impl App {
     }
 
     pub fn get_fastest_pairs(&self) -> Vec<(String, i64, u64)> {
-        vec![
-            ("TH".to_string(), 42, 12845),
-            ("ER".to_string(), 45, 11234),
-            ("AN".to_string(), 48, 10892),
-            ("IN".to_string(), 51, 9234),
-            ("HE".to_string(), 52, 8945),
-            ("RE".to_string(), 54, 8234),
-            ("ON".to_string(), 55, 7892),
-            ("ES".to_string(), 56, 7456),
-        ]
+        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        if events.is_empty() {
+            return vec![];
+        }
+        let timing = TimingAnalysis::from_events(events, FilterConfig::default());
+        let mut pairs: Vec<_> = timing.per_key_inter_key.iter()
+            .filter(|p| p.intervals_ms.len() >= 5)
+            .collect();
+        pairs.sort_by_key(|p| p.median_ms);
+        pairs.iter().take(8)
+            .map(|p| {
+                let label = format!(
+                    "{}{}",
+                    crate::models::keycode::KeyCode(p.from_key).to_name(),
+                    crate::models::keycode::KeyCode(p.to_key).to_name()
+                );
+                (label, p.median_ms, p.intervals_ms.len() as u64)
+            })
+            .collect()
     }
 
     pub fn get_slowest_pairs(&self) -> Vec<(String, i64, u64)> {
-        vec![
-            ("QU".to_string(), 185, 1234),
-            ("ZX".to_string(), 198, 89),
-            ("XC".to_string(), 142, 456),
-            ("PL".to_string(), 138, 892),
-            ("KL".to_string(), 135, 567),
-            ("JK".to_string(), 132, 234),
-            ("MN".to_string(), 128, 1892),
-            ("BN".to_string(), 125, 2345),
-        ]
+        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        if events.is_empty() {
+            return vec![];
+        }
+        let timing = TimingAnalysis::from_events(events, FilterConfig::default());
+        let mut pairs: Vec<_> = timing.per_key_inter_key.iter()
+            .filter(|p| p.intervals_ms.len() >= 5)
+            .collect();
+        pairs.sort_by_key(|p| std::cmp::Reverse(p.median_ms));
+        pairs.iter().take(8)
+            .map(|p| {
+                let label = format!(
+                    "{}{}",
+                    crate::models::keycode::KeyCode(p.from_key).to_name(),
+                    crate::models::keycode::KeyCode(p.to_key).to_name()
+                );
+                (label, p.median_ms, p.intervals_ms.len() as u64)
+            })
+            .collect()
     }
 
     pub fn handle_key(&mut self, key: KeyCode) {

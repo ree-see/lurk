@@ -41,6 +41,7 @@ pub struct InterKeyStats {
     pub p90_ms: i64,
     pub p95_ms: i64,
     pub p99_ms: i64,
+    pub raw_intervals: Vec<i64>,
 }
 
 impl TimingAnalysis {
@@ -130,6 +131,7 @@ impl TimingAnalysis {
                 p90_ms: 0,
                 p95_ms: 0,
                 p99_ms: 0,
+                raw_intervals: vec![],
             };
         }
 
@@ -147,6 +149,7 @@ impl TimingAnalysis {
             p90_ms,
             p95_ms,
             p99_ms,
+            raw_intervals: intervals,
         }
     }
 
