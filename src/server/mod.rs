@@ -8,7 +8,7 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::mpsc as std_mpsc;
+use std::sync::{mpsc as std_mpsc, Arc};
 use std::thread;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -19,17 +19,22 @@ use crate::models::KeystrokeEvent;
 use crate::storage::Database;
 
 /// Run the lurk server, listening for WebSocket connections.
-pub async fn run_server(port: u16, db_path: &PathBuf) -> Result<()> {
+pub async fn run_server(port: u16, db_path: &PathBuf, token: Option<String>) -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(&addr).await?;
-    
+
     info!("Lurk server listening on ws://0.0.0.0:{}", port);
     info!("Database: {:?}", db_path);
-    
+    if token.is_some() {
+        info!("Token authentication: enabled");
+    } else {
+        info!("Token authentication: disabled (open access)");
+    }
+
     // Channel for events from all clients (async -> sync bridge)
     let (async_tx, mut async_rx) = mpsc::channel::<KeystrokeEvent>(1000);
     let (sync_tx, sync_rx) = std_mpsc::channel::<KeystrokeEvent>();
-    
+
     // Spawn sync database writer thread (rusqlite isn't Send)
     let db_path_clone = db_path.clone();
     thread::spawn(move || {
@@ -40,15 +45,15 @@ pub async fn run_server(port: u16, db_path: &PathBuf) -> Result<()> {
                 return;
             }
         };
-        
+
         let mut batch: Vec<KeystrokeEvent> = Vec::with_capacity(100);
         let mut last_flush = std::time::Instant::now();
-        
+
         loop {
             match sync_rx.recv_timeout(std::time::Duration::from_secs(1)) {
                 Ok(event) => {
                     batch.push(event);
-                    
+
                     // Flush if batch is large or enough time has passed
                     if batch.len() >= 100 || last_flush.elapsed().as_secs() >= 5 {
                         for event in batch.drain(..) {
@@ -81,7 +86,7 @@ pub async fn run_server(port: u16, db_path: &PathBuf) -> Result<()> {
             }
         }
     });
-    
+
     // Spawn async -> sync bridge task
     tokio::spawn(async move {
         while let Some(event) = async_rx.recv().await {
@@ -91,19 +96,22 @@ pub async fn run_server(port: u16, db_path: &PathBuf) -> Result<()> {
             }
         }
     });
-    
+
+    let token = Arc::new(token);
+
     // Accept connections
     while let Ok((stream, addr)) = listener.accept().await {
         info!("New connection from: {}", addr);
         let tx = async_tx.clone();
-        
+        let token = Arc::clone(&token);
+
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, addr, tx).await {
+            if let Err(e) = handle_connection(stream, addr, tx, token).await {
                 error!("Connection error from {}: {}", addr, e);
             }
         });
     }
-    
+
     Ok(())
 }
 
@@ -111,22 +119,49 @@ async fn handle_connection(
     stream: TcpStream,
     addr: SocketAddr,
     tx: mpsc::Sender<KeystrokeEvent>,
+    token: Arc<Option<String>>,
 ) -> Result<()> {
     let ws_stream = accept_async(stream).await?;
     let (mut write, mut read) = ws_stream.split();
-    
+
     info!("WebSocket connection established with {}", addr);
-    
+
+    // If a token is required, the first message must be an auth message
+    if let Some(required_token) = token.as_ref() {
+        match read.next().await {
+            Some(Ok(Message::Text(text))) => {
+                match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(ClientMessage::Auth { token: provided }) if &provided == required_token => {
+                        info!("Client {} authenticated", addr);
+                    }
+                    _ => {
+                        let _ = write
+                            .send(Message::Text(
+                                serde_json::json!({"type": "error", "message": "Unauthorized"})
+                                    .to_string(),
+                            ))
+                            .await;
+                        return Err(anyhow::anyhow!("Auth failed from {}", addr));
+                    }
+                }
+            }
+            _ => return Err(anyhow::anyhow!("Auth timeout/error from {}", addr)),
+        }
+    }
+
     // Send welcome message
-    write.send(Message::Text(
-        serde_json::json!({
-            "type": "welcome",
-            "message": "Connected to lurk server"
-        }).to_string()
-    )).await?;
-    
+    write
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "welcome",
+                "message": "Connected to lurk server"
+            })
+            .to_string(),
+        ))
+        .await?;
+
     let mut event_count: u64 = 0;
-    
+
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
@@ -138,7 +173,7 @@ async fn handle_connection(
                                     error!("Failed to queue event");
                                 }
                                 event_count += 1;
-                                
+
                                 // Ack every 100 events
                                 if event_count % 100 == 0 {
                                     let ack = serde_json::json!({
@@ -149,9 +184,11 @@ async fn handle_connection(
                                 }
                             }
                             ClientMessage::Ping => {
-                                write.send(Message::Text(
-                                    serde_json::json!({"type": "pong"}).to_string()
-                                )).await?;
+                                write
+                                    .send(Message::Text(
+                                        serde_json::json!({"type": "pong"}).to_string(),
+                                    ))
+                                    .await?;
                             }
                             ClientMessage::Stats => {
                                 let stats = serde_json::json!({
@@ -159,6 +196,9 @@ async fn handle_connection(
                                     "events_received": event_count
                                 });
                                 write.send(Message::Text(stats.to_string())).await?;
+                            }
+                            ClientMessage::Auth { .. } => {
+                                warn!("Unexpected auth message from {} (already authenticated)", addr);
                             }
                         }
                     }
@@ -171,7 +211,10 @@ async fn handle_connection(
                 write.send(Message::Pong(data)).await?;
             }
             Ok(Message::Close(_)) => {
-                info!("Client {} disconnected (received {} events)", addr, event_count);
+                info!(
+                    "Client {} disconnected (received {} events)",
+                    addr, event_count
+                );
                 break;
             }
             Err(e) => {
@@ -181,8 +224,11 @@ async fn handle_connection(
             _ => {}
         }
     }
-    
-    info!("Connection closed: {} (total events: {})", addr, event_count);
+
+    info!(
+        "Connection closed: {} (total events: {})",
+        addr, event_count
+    );
     Ok(())
 }
 
@@ -191,6 +237,7 @@ async fn handle_connection(
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ClientMessage {
     Event(KeystrokeEvent),
+    Auth { token: String },
     Ping,
     Stats,
 }
@@ -198,7 +245,7 @@ enum ClientMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_client_message_parsing() {
         let event_json = r#"{
@@ -209,7 +256,7 @@ mod tests {
             "modifiers": ["shift"],
             "application": "com.test.app"
         }"#;
-        
+
         let msg: ClientMessage = serde_json::from_str(event_json).unwrap();
         match msg {
             ClientMessage::Event(e) => {
@@ -218,11 +265,33 @@ mod tests {
             _ => panic!("Expected Event"),
         }
     }
-    
+
     #[test]
     fn test_ping_message() {
         let ping_json = r#"{"type": "ping"}"#;
         let msg: ClientMessage = serde_json::from_str(ping_json).unwrap();
         assert!(matches!(msg, ClientMessage::Ping));
+    }
+
+    #[test]
+    fn test_auth_message_parsing() {
+        let auth_json = r#"{"type": "auth", "token": "mysecret"}"#;
+        let msg: ClientMessage = serde_json::from_str(auth_json).unwrap();
+        match msg {
+            ClientMessage::Auth { token } => {
+                assert_eq!(token, "mysecret");
+            }
+            _ => panic!("Expected Auth"),
+        }
+    }
+
+    #[test]
+    fn test_auth_token_comparison() {
+        let required = "correct_token".to_string();
+        let provided = "correct_token".to_string();
+        assert_eq!(&provided, &required);
+
+        let wrong = "wrong_token".to_string();
+        assert_ne!(&wrong, &required);
     }
 }

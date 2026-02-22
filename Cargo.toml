@@ -17,6 +17,7 @@ rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"]
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -41,9 +42,10 @@ crossterm = "0.28"
 # Event capture (macOS only)
 rdev = "0.5"
 
-# macOS APIs
-cocoa = "0.26"
-objc = "0.2"
+# macOS APIs — modern objc2 bindings replace deprecated cocoa/objc
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = { version = "0.2", features = ["NSString"] }
 core-foundation = "0.10"
 
 [profile.release]

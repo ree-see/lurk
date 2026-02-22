@@ -1,5 +1,6 @@
 mod analysis;
 mod cli;
+mod config;
 #[cfg(target_os = "macos")]
 mod daemon;
 mod models;
@@ -61,15 +62,21 @@ enum Commands {
     Daemon {
         #[arg(short, long, help = "Send events to remote server (e.g., ws://server:9999)")]
         remote: Option<String>,
-        
+
         #[arg(long, default_value = "true", help = "Also store events locally")]
         local: bool,
+
+        #[arg(long, help = "Shared secret token for authenticating with remote server")]
+        token: Option<String>,
     },
 
     #[command(about = "Run the server to receive events from remote clients")]
     Server {
         #[arg(short, long, default_value = "9999", help = "Port to listen on")]
         port: u16,
+
+        #[arg(long, help = "Require this token from connecting daemons")]
+        token: Option<String>,
     },
 
     #[command(about = "Export keystroke data")]
@@ -125,18 +132,26 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let cfg = config::load_config().unwrap_or_default();
 
     match cli.command {
         #[cfg(target_os = "macos")]
-        None | Some(Commands::Daemon { remote: None, .. }) => run_daemon(None, true),
+        None => run_daemon(cfg.daemon.remote, cfg.daemon.local.unwrap_or(true), cfg.daemon.token),
         #[cfg(target_os = "macos")]
-        Some(Commands::Daemon { remote, local }) => run_daemon(remote, local),
+        Some(Commands::Daemon { remote, local, token }) => {
+            let effective_remote = remote.or(cfg.daemon.remote);
+            let effective_token = token.or(cfg.daemon.token);
+            run_daemon(effective_remote, local, effective_token)
+        }
         #[cfg(not(target_os = "macos"))]
         None => {
             eprintln!("Daemon mode requires macOS. Use 'lurk server' on Linux.");
             std::process::exit(1);
         }
-        Some(Commands::Server { port }) => run_server(port),
+        Some(Commands::Server { port, token }) => {
+            let effective_token = token.or(cfg.server.token);
+            run_server(port, effective_token)
+        }
         Some(Commands::Export { format, output }) => run_export(&format, &output),
         Some(Commands::Stats { days }) => run_stats(days),
         Some(Commands::Analyze { top, max_gap, detailed }) => run_analyze(top, max_gap, detailed),
@@ -160,7 +175,7 @@ fn run_dashboard() -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn run_daemon(remote: Option<String>, local: bool) -> Result<()> {
+fn run_daemon(remote: Option<String>, local: bool, token: Option<String>) -> Result<()> {
     info!("Starting lurk daemon...");
 
     daemon::ensure_permissions()?;
@@ -178,9 +193,10 @@ fn run_daemon(remote: Option<String>, local: bool) -> Result<()> {
         (Some(remote_url), false) => {
             info!("Mode: remote only");
             info!("Server: {}", remote_url);
-            
+
             let config = server::RemoteClientConfig {
                 url: remote_url.clone(),
+                token: token.clone(),
                 ..Default::default()
             };
             
@@ -195,14 +211,15 @@ fn run_daemon(remote: Option<String>, local: bool) -> Result<()> {
         (Some(remote_url), true) => {
             info!("Mode: remote + local backup");
             info!("Server: {}", remote_url);
-            
+
             let db_path = get_db_path();
             let db = storage::Database::new(&db_path)?;
             set_secure_file_permissions(&db_path)?;
             info!("Local database: {:?}", db_path);
-            
+
             let config = server::RemoteClientConfig {
                 url: remote_url.clone(),
+                token: token.clone(),
                 ..Default::default()
             };
             
@@ -308,19 +325,19 @@ fn run_daemon(remote: Option<String>, local: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_server(port: u16) -> Result<()> {
+fn run_server(port: u16, token: Option<String>) -> Result<()> {
     info!("Starting lurk server on port {}...", port);
-    
+
     let data_dir = get_data_dir();
     create_secure_dir(&data_dir)?;
-    
+
     let db_path = get_db_path();
     info!("Database: {:?}", db_path);
-    
+
     // Run async server
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(server::run_server(port, &db_path))?;
-    
+    rt.block_on(server::run_server(port, &db_path, token))?;
+
     Ok(())
 }
 
