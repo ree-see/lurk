@@ -12,7 +12,8 @@ use clap::{Parser, Subcommand};
 use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::time::Duration;
 use std::thread;
 use tracing::{error, info};
 
@@ -210,13 +211,38 @@ fn run_daemon(remote: Option<String>, local: bool) -> Result<()> {
             
             // Forward events to both local DB and remote
             thread::spawn(move || {
-                for event in rx {
-                    // Store locally
-                    if let Err(e) = db.insert_event(&event) {
-                        error!("Failed to write event locally: {}", e);
+                let mut db = db;
+                let mut batch = Vec::with_capacity(100);
+                let flush_interval = Duration::from_millis(50);
+
+                loop {
+                    match rx.recv_timeout(flush_interval) {
+                        Ok(event) => {
+                            // Forward to remote (ignore send errors, client handles reconnect)
+                            let _ = remote_tx.send(event.clone());
+                            batch.push(event);
+                            if batch.len() >= 100 {
+                                if let Err(e) = db.insert_events_batch(&batch) {
+                                    error!("Failed to write batch locally: {}", e);
+                                }
+                                batch.clear();
+                            }
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            if !batch.is_empty() {
+                                if let Err(e) = db.insert_events_batch(&batch) {
+                                    error!("Failed to write batch locally: {}", e);
+                                }
+                                batch.clear();
+                            }
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            if !batch.is_empty() {
+                                let _ = db.insert_events_batch(&batch);
+                            }
+                            break;
+                        }
                     }
-                    // Forward to remote (ignore send errors, client handles reconnect)
-                    let _ = remote_tx.send(event);
                 }
             });
             
@@ -238,9 +264,35 @@ fn run_daemon(remote: Option<String>, local: bool) -> Result<()> {
             info!("Database: {:?}", db_path);
 
             thread::spawn(move || {
-                for event in rx {
-                    if let Err(e) = db.insert_event(&event) {
-                        error!("Failed to write event: {}", e);
+                let mut db = db;
+                let mut batch = Vec::with_capacity(100);
+                let flush_interval = Duration::from_millis(50);
+
+                loop {
+                    match rx.recv_timeout(flush_interval) {
+                        Ok(event) => {
+                            batch.push(event);
+                            if batch.len() >= 100 {
+                                if let Err(e) = db.insert_events_batch(&batch) {
+                                    error!("Failed to write batch: {}", e);
+                                }
+                                batch.clear();
+                            }
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            if !batch.is_empty() {
+                                if let Err(e) = db.insert_events_batch(&batch) {
+                                    error!("Failed to write batch: {}", e);
+                                }
+                                batch.clear();
+                            }
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            if !batch.is_empty() {
+                                let _ = db.insert_events_batch(&batch);
+                            }
+                            break;
+                        }
                     }
                 }
             });

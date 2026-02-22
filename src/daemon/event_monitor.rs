@@ -61,9 +61,27 @@ impl EventMonitor {
     pub fn start(self) -> Result<()> {
         let app_tracker = self.app_tracker;
         let event_sender = self.event_sender;
+        let mut active_modifiers: Vec<Modifier> = Vec::new();
 
         listen(move |event: Event| {
-            if let Some(keystroke) = Self::process_event(&event, &app_tracker) {
+            // Update modifier state before processing
+            match &event.event_type {
+                EventType::KeyPress(key) => {
+                    if let Some(m) = Self::key_to_modifier(key) {
+                        if !active_modifiers.contains(&m) {
+                            active_modifiers.push(m);
+                        }
+                    }
+                }
+                EventType::KeyRelease(key) => {
+                    if let Some(m) = Self::key_to_modifier(key) {
+                        active_modifiers.retain(|x| x != &m);
+                    }
+                }
+                _ => {}
+            }
+
+            if let Some(keystroke) = Self::process_event(&event, &app_tracker, &active_modifiers) {
                 if let Err(e) = event_sender.send(keystroke) {
                     error!("Failed to send event: {}", e);
                 }
@@ -72,7 +90,19 @@ impl EventMonitor {
         .map_err(|e| anyhow::anyhow!("Failed to start event listener: {:?}", e))
     }
 
-    fn process_event(event: &Event, app_tracker: &AppTracker) -> Option<KeystrokeEvent> {
+    fn key_to_modifier(key: &Key) -> Option<Modifier> {
+        match key {
+            Key::ShiftLeft | Key::ShiftRight => Some(Modifier::Shift),
+            Key::ControlLeft | Key::ControlRight => Some(Modifier::Control),
+            Key::Alt | Key::AltGr => Some(Modifier::Alt),
+            Key::MetaLeft | Key::MetaRight => Some(Modifier::Command),
+            Key::CapsLock => Some(Modifier::CapsLock),
+            Key::Function => Some(Modifier::Function),
+            _ => None,
+        }
+    }
+
+    fn process_event(event: &Event, app_tracker: &AppTracker, modifiers: &[Modifier]) -> Option<KeystrokeEvent> {
         let (key, event_type) = match &event.event_type {
             EventType::KeyPress(key) => (key, KEventType::Press),
             EventType::KeyRelease(key) => (key, KEventType::Release),
@@ -87,14 +117,13 @@ impl EventMonitor {
         }
 
         let key_code = KeyCode::from_rdev_key(key);
-        let modifiers = Self::extract_modifiers(key);
 
         debug!("Event: {:?} app={}", event_type, application);
 
         Some(KeystrokeEvent::new(
             key_code.0,
             event_type,
-            modifiers,
+            modifiers.to_vec(),
             application,
         ))
     }
@@ -103,21 +132,5 @@ impl EventMonitor {
         SENSITIVE_APP_BLOCKLIST
             .iter()
             .any(|blocked| bundle_id.eq_ignore_ascii_case(blocked))
-    }
-
-    fn extract_modifiers(key: &Key) -> Vec<Modifier> {
-        let mut modifiers = Vec::new();
-
-        match key {
-            Key::ShiftLeft | Key::ShiftRight => modifiers.push(Modifier::Shift),
-            Key::ControlLeft | Key::ControlRight => modifiers.push(Modifier::Control),
-            Key::Alt | Key::AltGr => modifiers.push(Modifier::Alt),
-            Key::MetaLeft | Key::MetaRight => modifiers.push(Modifier::Command),
-            Key::CapsLock => modifiers.push(Modifier::CapsLock),
-            Key::Function => modifiers.push(Modifier::Function),
-            _ => {}
-        }
-
-        modifiers
     }
 }
