@@ -335,58 +335,65 @@ impl Database {
 
     pub fn get_events_since(&self, days_ago: u32) -> Result<Vec<KeystrokeEvent>> {
         use std::time::{SystemTime, UNIX_EPOCH};
-        
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        
+
         let start = now - (days_ago as i64 * 24 * 60 * 60 * 1000);
         self.get_events_in_range(start, now)
     }
 
-    pub fn get_total_count(&self) -> Result<i64> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM keystroke_events", [], |row| {
-                row.get(0)
-            })?;
-        Ok(count)
-    }
-
-    pub fn get_press_count(&self) -> Result<i64> {
+    /// `since` is an inclusive epoch-ms cutoff; `None` means all history.
+    pub fn get_total_count(&self, since: Option<i64>) -> Result<i64> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM keystroke_events WHERE event_type = 'press'",
-            [],
+            "SELECT COUNT(*) FROM keystroke_events WHERE timestamp >= ?1",
+            params![since.unwrap_or(i64::MIN)],
             |row| row.get(0),
         )?;
         Ok(count)
     }
 
-    pub fn get_date_range(&self) -> Result<Option<(i64, i64)>> {
-        let result: Result<(i64, i64), _> = self.conn.query_row(
-            "SELECT MIN(timestamp), MAX(timestamp) FROM keystroke_events",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        );
+    pub fn get_press_count(&self, since: Option<i64>) -> Result<i64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM keystroke_events
+             WHERE event_type = 'press' AND timestamp >= ?1",
+            params![since.unwrap_or(i64::MIN)],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
 
-        match result {
-            Ok((min, max)) => Ok(Some((min, max))),
-            Err(_) => Ok(None),
+    pub fn get_date_range(&self, since: Option<i64>) -> Result<Option<(i64, i64)>> {
+        let (min, max): (Option<i64>, Option<i64>) = self.conn.query_row(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM keystroke_events
+             WHERE timestamp >= ?1",
+            params![since.unwrap_or(i64::MIN)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        // MIN/MAX over an empty window are NULL, not an error.
+        match (min, max) {
+            (Some(min), Some(max)) => Ok(Some((min, max))),
+            _ => Ok(None),
         }
     }
 
-    pub fn get_top_keys(&self, limit: usize) -> Result<Vec<(u32, i64)>> {
+    pub fn get_top_keys(&self, limit: usize, since: Option<i64>) -> Result<Vec<(u32, i64)>> {
+        // ?N params bind by index, not appearance order: ?1 = limit, ?2 = since.
         let mut stmt = self.conn.prepare(
             "SELECT key_code, COUNT(*) as count
              FROM keystroke_events
-             WHERE event_type = 'press'
+             WHERE event_type = 'press' AND timestamp >= ?2
              GROUP BY key_code
              ORDER BY count DESC
              LIMIT ?1",
         )?;
 
-        let rows = stmt.query_map(params![limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map(params![limit as i64, since.unwrap_or(i64::MIN)], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -396,17 +403,23 @@ impl Database {
         Ok(results)
     }
 
-    pub fn get_top_applications(&self, limit: usize) -> Result<Vec<(String, i64)>> {
+    pub fn get_top_applications(
+        &self,
+        limit: usize,
+        since: Option<i64>,
+    ) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT application, COUNT(*) as count
              FROM keystroke_events
-             WHERE event_type = 'press'
+             WHERE event_type = 'press' AND timestamp >= ?2
              GROUP BY application
              ORDER BY count DESC
              LIMIT ?1",
         )?;
 
-        let rows = stmt.query_map(params![limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map(params![limit as i64, since.unwrap_or(i64::MIN)], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -423,8 +436,12 @@ impl Database {
         )?;
 
         // These PRAGMAs return results, so use query_row and ignore the result
-        let _ = self.conn.query_row("PRAGMA incremental_vacuum(100)", [], |_| Ok(()));
-        let _ = self.conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+        let _ = self
+            .conn
+            .query_row("PRAGMA incremental_vacuum(100)", [], |_| Ok(()));
+        let _ = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
 
         Ok(deleted)
     }
@@ -448,51 +465,57 @@ mod tests {
     #[test]
     fn test_database_creation() {
         let db = Database::new(":memory:").unwrap();
-        assert_eq!(db.get_total_count().unwrap(), 0);
+        assert_eq!(db.get_total_count(None).unwrap(), 0);
     }
 
     #[test]
     fn test_insert_and_retrieve_event() {
         let db = Database::new(":memory:").unwrap();
-        
+
         let event = create_test_event(1000, 0x00, EventType::Press);
         db.insert_event(&event).unwrap();
 
-        assert_eq!(db.get_total_count().unwrap(), 1);
-        assert_eq!(db.get_press_count().unwrap(), 1);
+        assert_eq!(db.get_total_count(None).unwrap(), 1);
+        assert_eq!(db.get_press_count(None).unwrap(), 1);
     }
 
     #[test]
     fn test_insert_multiple_events() {
         let db = Database::new(":memory:").unwrap();
-        
+
         for i in 0..10 {
             let event = create_test_event(1000 + i, 0x00, EventType::Press);
             db.insert_event(&event).unwrap();
         }
 
-        assert_eq!(db.get_total_count().unwrap(), 10);
+        assert_eq!(db.get_total_count(None).unwrap(), 10);
     }
 
     #[test]
     fn test_press_vs_release_count() {
         let db = Database::new(":memory:").unwrap();
-        
-        db.insert_event(&create_test_event(1000, 0x00, EventType::Press)).unwrap();
-        db.insert_event(&create_test_event(1050, 0x00, EventType::Release)).unwrap();
-        db.insert_event(&create_test_event(1100, 0x01, EventType::Press)).unwrap();
-        db.insert_event(&create_test_event(1150, 0x01, EventType::Release)).unwrap();
 
-        assert_eq!(db.get_total_count().unwrap(), 4);
-        assert_eq!(db.get_press_count().unwrap(), 2);
+        db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(1050, 0x00, EventType::Release))
+            .unwrap();
+        db.insert_event(&create_test_event(1100, 0x01, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(1150, 0x01, EventType::Release))
+            .unwrap();
+
+        assert_eq!(db.get_total_count(None).unwrap(), 4);
+        assert_eq!(db.get_press_count(None).unwrap(), 2);
     }
 
     #[test]
     fn test_get_all_events() {
         let db = Database::new(":memory:").unwrap();
-        
-        db.insert_event(&create_test_event(1000, 0x00, EventType::Press)).unwrap();
-        db.insert_event(&create_test_event(1050, 0x00, EventType::Release)).unwrap();
+
+        db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(1050, 0x00, EventType::Release))
+            .unwrap();
 
         let events = db.get_all_events().unwrap();
         assert_eq!(events.len(), 2);
@@ -503,10 +526,13 @@ mod tests {
     #[test]
     fn test_get_events_in_range() {
         let db = Database::new(":memory:").unwrap();
-        
-        db.insert_event(&create_test_event(1000, 0x00, EventType::Press)).unwrap();
-        db.insert_event(&create_test_event(2000, 0x01, EventType::Press)).unwrap();
-        db.insert_event(&create_test_event(3000, 0x02, EventType::Press)).unwrap();
+
+        db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(2000, 0x01, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(3000, 0x02, EventType::Press))
+            .unwrap();
 
         let events = db.get_events_in_range(1500, 2500).unwrap();
         assert_eq!(events.len(), 1);
@@ -516,27 +542,32 @@ mod tests {
     #[test]
     fn test_get_date_range() {
         let db = Database::new(":memory:").unwrap();
-        
-        db.insert_event(&create_test_event(1000, 0x00, EventType::Press)).unwrap();
-        db.insert_event(&create_test_event(5000, 0x01, EventType::Press)).unwrap();
 
-        let range = db.get_date_range().unwrap().unwrap();
+        db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(5000, 0x01, EventType::Press))
+            .unwrap();
+
+        let range = db.get_date_range(None).unwrap().unwrap();
         assert_eq!(range, (1000, 5000));
     }
 
     #[test]
     fn test_get_top_keys() {
         let db = Database::new(":memory:").unwrap();
-        
+
         for _ in 0..5 {
-            db.insert_event(&create_test_event(1000, 0x00, EventType::Press)).unwrap();
+            db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+                .unwrap();
         }
         for _ in 0..3 {
-            db.insert_event(&create_test_event(1000, 0x01, EventType::Press)).unwrap();
+            db.insert_event(&create_test_event(1000, 0x01, EventType::Press))
+                .unwrap();
         }
-        db.insert_event(&create_test_event(1000, 0x02, EventType::Press)).unwrap();
+        db.insert_event(&create_test_event(1000, 0x02, EventType::Press))
+            .unwrap();
 
-        let top = db.get_top_keys(2).unwrap();
+        let top = db.get_top_keys(2, None).unwrap();
         assert_eq!(top.len(), 2);
         assert_eq!(top[0], (0x00, 5));
         assert_eq!(top[1], (0x01, 3));
@@ -545,10 +576,10 @@ mod tests {
     #[test]
     fn test_get_top_applications() {
         let db = Database::new(":memory:").unwrap();
-        
+
         let mut event1 = create_test_event(1000, 0x00, EventType::Press);
         event1.application = "com.app.one".to_string();
-        
+
         let mut event2 = create_test_event(1001, 0x00, EventType::Press);
         event2.application = "com.app.two".to_string();
 
@@ -556,29 +587,102 @@ mod tests {
         db.insert_event(&event1).unwrap();
         db.insert_event(&event2).unwrap();
 
-        let top = db.get_top_applications(2).unwrap();
+        let top = db.get_top_applications(2, None).unwrap();
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].0, "com.app.one");
         assert_eq!(top[0].1, 2);
     }
 
     #[test]
+    fn test_counts_filtered_by_since() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(1050, 0x00, EventType::Release))
+            .unwrap();
+        db.insert_event(&create_test_event(2000, 0x01, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(3000, 0x02, EventType::Press))
+            .unwrap();
+
+        // since is inclusive: events at exactly the cutoff are counted
+        assert_eq!(db.get_total_count(Some(2000)).unwrap(), 2);
+        assert_eq!(db.get_press_count(Some(2000)).unwrap(), 2);
+        // None preserves unfiltered behavior
+        assert_eq!(db.get_total_count(None).unwrap(), 4);
+        assert_eq!(db.get_press_count(None).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_date_range_filtered_by_since() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(5000, 0x01, EventType::Press))
+            .unwrap();
+
+        assert_eq!(db.get_date_range(Some(2000)).unwrap(), Some((5000, 5000)));
+        assert_eq!(db.get_date_range(None).unwrap(), Some((1000, 5000)));
+        // empty filtered window must be None, not an error or (NULL, NULL)
+        assert_eq!(db.get_date_range(Some(9000)).unwrap(), None);
+    }
+
+    #[test]
+    fn test_top_keys_filtered_by_since() {
+        let db = Database::new(":memory:").unwrap();
+
+        for _ in 0..5 {
+            db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+                .unwrap();
+        }
+        for _ in 0..3 {
+            db.insert_event(&create_test_event(4000, 0x01, EventType::Press))
+                .unwrap();
+        }
+
+        let top = db.get_top_keys(5, Some(2000)).unwrap();
+        assert_eq!(top, vec![(0x01, 3)]);
+    }
+
+    #[test]
+    fn test_top_applications_filtered_by_since() {
+        let db = Database::new(":memory:").unwrap();
+
+        let mut old_event = create_test_event(1000, 0x00, EventType::Press);
+        old_event.application = "com.app.old".to_string();
+        let mut new_event = create_test_event(4000, 0x00, EventType::Press);
+        new_event.application = "com.app.new".to_string();
+
+        db.insert_event(&old_event).unwrap();
+        db.insert_event(&old_event).unwrap();
+        db.insert_event(&new_event).unwrap();
+
+        let top = db.get_top_applications(5, Some(2000)).unwrap();
+        assert_eq!(top, vec![("com.app.new".to_string(), 1)]);
+    }
+
+    #[test]
     fn test_cleanup_old_events() {
         let db = Database::new(":memory:").unwrap();
-        
-        db.insert_event(&create_test_event(1000, 0x00, EventType::Press)).unwrap();
-        db.insert_event(&create_test_event(2000, 0x01, EventType::Press)).unwrap();
-        db.insert_event(&create_test_event(3000, 0x02, EventType::Press)).unwrap();
+
+        db.insert_event(&create_test_event(1000, 0x00, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(2000, 0x01, EventType::Press))
+            .unwrap();
+        db.insert_event(&create_test_event(3000, 0x02, EventType::Press))
+            .unwrap();
 
         let deleted = db.cleanup_old_events(2500).unwrap();
         assert_eq!(deleted, 2);
-        assert_eq!(db.get_total_count().unwrap(), 1);
+        assert_eq!(db.get_total_count(None).unwrap(), 1);
     }
 
     #[test]
     fn test_event_with_modifiers() {
         let db = Database::new(":memory:").unwrap();
-        
+
         let event = KeystrokeEvent {
             timestamp: 1000,
             key_code: 0x00,
@@ -586,9 +690,9 @@ mod tests {
             modifiers: vec![Modifier::Shift, Modifier::Command],
             application: "com.test.app".to_string(),
         };
-        
+
         db.insert_event(&event).unwrap();
-        
+
         let events = db.get_all_events().unwrap();
         assert_eq!(events[0].modifiers.len(), 2);
     }

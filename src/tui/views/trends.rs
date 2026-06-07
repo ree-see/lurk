@@ -33,10 +33,9 @@ fn render_daily_chart(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     let daily_counts = app.get_daily_counts();
-    
+
     if daily_counts.is_empty() {
-        let msg = Paragraph::new("No data available")
-            .style(Style::default().fg(Color::DarkGray));
+        let msg = Paragraph::new("No data available").style(Style::default().fg(Color::DarkGray));
         f.render_widget(msg, inner);
         return;
     }
@@ -60,13 +59,15 @@ fn render_weekly_comparison(f: &mut Frame, app: &App, area: Rect) {
 
     let weekly_data = app.get_weekly_comparison();
 
-    let header = Line::from(vec![
-        Span::styled(
-            format!("{:<8} {:>8} {:>8} {:>8} {:>8}  {:<10}",
-                "Key", "Week 1", "Week 2", "Week 3", "Week 4", "Trend"),
-            Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+    let header = Line::from(vec![Span::styled(
+        format!(
+            "{:<8} {:>8} {:>8} {:>8} {:>8}  {:<10}",
+            "Key", "Week 1", "Week 2", "Week 3", "Week 4", "Trend"
         ),
-    ]);
+        Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    )]);
 
     let mut items = vec![ListItem::new(header)];
 
@@ -78,7 +79,10 @@ fn render_weekly_comparison(f: &mut Frame, app: &App, area: Rect) {
         };
 
         let line = Line::from(vec![
-            Span::styled(format!("{:<8}", key_name), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{:<8}", key_name),
+                Style::default().fg(Color::White),
+            ),
             Span::styled(
                 format!(" {:>7.1}%", percentages.first().unwrap_or(&0.0)),
                 Style::default().fg(Color::Gray),
@@ -118,9 +122,12 @@ fn render_app_distribution(f: &mut Frame, app: &App, area: Rect) {
         .map(|(name, pct)| {
             let bar_width = (pct / 2.0) as usize;
             let bar: String = "█".repeat(bar_width.min(30));
-            
+
             let line = Line::from(vec![
-                Span::styled(format!("{:<20}", truncate_app_name(name)), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{:<20}", truncate_app_name(name)),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled(format!("{:>6.1}% ", pct), Style::default().fg(Color::Gray)),
                 Span::styled(bar, Style::default().fg(Color::White)),
             ]);
@@ -133,13 +140,11 @@ fn render_app_distribution(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn truncate_app_name(name: &str) -> String {
-    let short = name
-        .split('.')
-        .last()
-        .unwrap_or(name);
-    
-    if short.len() > 18 {
-        format!("{}…", &short[..17])
+    let short = crate::models::shorten_bundle_id(name);
+
+    if short.chars().count() > 18 {
+        let truncated: String = short.chars().take(17).collect();
+        format!("{}…", truncated)
     } else {
         short.to_string()
     }

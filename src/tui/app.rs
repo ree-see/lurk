@@ -162,27 +162,38 @@ impl App {
             self.events_cache = Some(events);
             self.cache_time_range = Some(self.time_range);
         }
-        self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[])
+        self.events_cache
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn get_key_frequencies(&self) -> HashMap<u32, f64> {
-        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let events = self
+            .events_cache
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         if events.is_empty() {
             return HashMap::new();
         }
 
         let freq = FrequencyAnalysis::from_events(events);
         let mut result = HashMap::new();
-        
+
         for key in freq.top_keys(100) {
             result.insert(key.key_code, key.percentage);
         }
-        
+
         result
     }
 
     pub fn get_top_keys(&self, n: usize) -> Vec<(String, u64, f64)> {
-        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let events = self
+            .events_cache
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         if events.is_empty() {
             return vec![];
         }
@@ -195,8 +206,12 @@ impl App {
     }
 
     pub fn get_stats(&self) -> DashboardStats {
-        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        
+        let events = self
+            .events_cache
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
         let total_presses = events
             .iter()
             .filter(|e| matches!(e.event_type, crate::models::EventType::Press))
@@ -211,7 +226,7 @@ impl App {
 
         let config = FilterConfig::default();
         let timing = TimingAnalysis::from_events(events, config);
-        
+
         let estimated_wpm = if timing.overall_inter_key.mean_ms > 0.0 {
             ((60000.0 / timing.overall_inter_key.mean_ms) / 5.0) as u32
         } else {
@@ -228,13 +243,17 @@ impl App {
     }
 
     pub fn get_daily_counts(&self) -> Vec<u64> {
-        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let events = self
+            .events_cache
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         if events.is_empty() {
             return vec![];
         }
 
         let mut daily: HashMap<String, u64> = HashMap::new();
-        
+
         for event in events {
             if matches!(event.event_type, crate::models::EventType::Press) {
                 let date = chrono::DateTime::from_timestamp_millis(event.timestamp)
@@ -250,7 +269,11 @@ impl App {
     }
 
     pub fn get_weekly_comparison(&self) -> Vec<(String, Vec<f64>, String)> {
-        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let events = self
+            .events_cache
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         if events.is_empty() {
             return vec![];
         }
@@ -259,7 +282,12 @@ impl App {
         freq.top_keys(8)
             .iter()
             .map(|k| {
-                let pcts = vec![k.percentage, k.percentage * 0.98, k.percentage * 1.02, k.percentage];
+                let pcts = vec![
+                    k.percentage,
+                    k.percentage * 0.98,
+                    k.percentage * 1.02,
+                    k.percentage,
+                ];
                 let trend = "→ Stable".to_string();
                 (k.key_name.clone(), pcts, trend)
             })
@@ -268,7 +296,7 @@ impl App {
 
     pub fn get_app_distribution(&self) -> Vec<(String, f64)> {
         self.db
-            .get_top_applications(5)
+            .get_top_applications(5, None)
             .unwrap_or_default()
             .into_iter()
             .map(|(app, count)| {
@@ -282,9 +310,9 @@ impl App {
     pub fn get_finger_loads(&self) -> Vec<(Finger, f64)> {
         let layout = QwertyLayout::new();
         let frequencies = self.get_key_frequencies();
-        
+
         let mut finger_totals: HashMap<Finger, f64> = HashMap::new();
-        
+
         for (keycode, pct) in &frequencies {
             if let Some(finger) = layout.get_finger(*keycode) {
                 *finger_totals.entry(finger).or_insert(0.0) += pct;
@@ -310,13 +338,13 @@ impl App {
 
     pub fn get_hand_balance(&self) -> (f64, f64) {
         let finger_loads = self.get_finger_loads();
-        
+
         let left: f64 = finger_loads
             .iter()
             .filter(|(f, _)| f.hand() == Hand::Left)
             .map(|(_, pct)| pct)
             .sum();
-        
+
         let right: f64 = finger_loads
             .iter()
             .filter(|(f, _)| f.hand() == Hand::Right)
@@ -345,30 +373,56 @@ impl App {
     }
 
     pub fn get_timing_histogram(&self) -> Vec<(String, u64)> {
-        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let events = self
+            .events_cache
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         if events.is_empty() {
             return vec![];
         }
 
         let config = FilterConfig::default();
         let timing = TimingAnalysis::from_events(events, config);
-        
+
         vec![
-            ("0-50".to_string(), (timing.overall_inter_key.count as f64 * 0.15) as u64),
-            ("50-100".to_string(), (timing.overall_inter_key.count as f64 * 0.35) as u64),
-            ("100-150".to_string(), (timing.overall_inter_key.count as f64 * 0.25) as u64),
-            ("150-200".to_string(), (timing.overall_inter_key.count as f64 * 0.12) as u64),
-            ("200-250".to_string(), (timing.overall_inter_key.count as f64 * 0.08) as u64),
-            ("250+".to_string(), (timing.overall_inter_key.count as f64 * 0.05) as u64),
+            (
+                "0-50".to_string(),
+                (timing.overall_inter_key.count as f64 * 0.15) as u64,
+            ),
+            (
+                "50-100".to_string(),
+                (timing.overall_inter_key.count as f64 * 0.35) as u64,
+            ),
+            (
+                "100-150".to_string(),
+                (timing.overall_inter_key.count as f64 * 0.25) as u64,
+            ),
+            (
+                "150-200".to_string(),
+                (timing.overall_inter_key.count as f64 * 0.12) as u64,
+            ),
+            (
+                "200-250".to_string(),
+                (timing.overall_inter_key.count as f64 * 0.08) as u64,
+            ),
+            (
+                "250+".to_string(),
+                (timing.overall_inter_key.count as f64 * 0.05) as u64,
+            ),
         ]
     }
 
     pub fn get_speed_metrics(&self) -> SpeedMetrics {
-        let events = self.events_cache.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-        
+        let events = self
+            .events_cache
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+
         let config = FilterConfig::default();
         let timing = TimingAnalysis::from_events(events, config);
-        
+
         let mean_ms = timing.overall_inter_key.mean_ms;
         let estimated_wpm = if mean_ms > 0.0 {
             ((60000.0 / mean_ms) / 5.0) as u32
@@ -378,15 +432,16 @@ impl App {
 
         let burst_wpm = (estimated_wpm as f64 * 1.3) as u32;
 
-        let consistency = if timing.overall_inter_key.p95_ms < timing.overall_inter_key.median_ms * 2 {
-            "Excellent"
-        } else if timing.overall_inter_key.p95_ms < timing.overall_inter_key.median_ms * 3 {
-            "Good"
-        } else if timing.overall_inter_key.p95_ms < timing.overall_inter_key.median_ms * 4 {
-            "Fair"
-        } else {
-            "Variable"
-        };
+        let consistency =
+            if timing.overall_inter_key.p95_ms < timing.overall_inter_key.median_ms * 2 {
+                "Excellent"
+            } else if timing.overall_inter_key.p95_ms < timing.overall_inter_key.median_ms * 3 {
+                "Good"
+            } else if timing.overall_inter_key.p95_ms < timing.overall_inter_key.median_ms * 4 {
+                "Fair"
+            } else {
+                "Variable"
+            };
 
         SpeedMetrics {
             mean_ms,
@@ -537,7 +592,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_content(f: &mut Frame, app: &mut App, area: Rect) {
     app.refresh_data();
-    
+
     match app.current_view {
         View::Overview => views::render_overview(f, app, area),
         View::Trends => views::render_trends(f, app, area),

@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn test_keycode_from_rdev_key() {
         use rdev::Key;
-        
+
         assert_eq!(KeyCode::from_rdev_key(&Key::KeyA).0, 0x00);
         assert_eq!(KeyCode::from_rdev_key(&Key::Space).0, 0x31);
         assert_eq!(KeyCode::from_rdev_key(&Key::Return).0, 0x24);

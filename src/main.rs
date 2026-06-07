@@ -401,7 +401,7 @@ fn run_cleanup(days: u32, force: bool) -> Result<()> {
     }
 
     let db = storage::Database::new(&db_path)?;
-    let total_before = db.get_total_count()?;
+    let total_before = db.get_total_count(None)?;
 
     if total_before == 0 {
         println!("Database is empty. Nothing to clean up.");
@@ -431,7 +431,7 @@ fn run_cleanup(days: u32, force: bool) -> Result<()> {
     }
 
     let deleted = db.cleanup_old_events(cutoff_ms)?;
-    let total_after = db.get_total_count()?;
+    let total_after = db.get_total_count(None)?;
 
     println!("Cleanup complete:");
     println!("  Deleted: {} events", deleted);
